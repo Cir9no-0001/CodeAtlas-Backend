@@ -1,9 +1,10 @@
 import hashlib
 import httpx
 import re
+from datetime import datetime, timedelta, timezone
 from fastapi.concurrency import run_in_threadpool
 from typing import Annotated
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, Cookie
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 from pydantic import BaseModel, EmailStr, Field, AfterValidator
@@ -11,7 +12,8 @@ from slowapi import Limiter
 from slowapi.util import get_remote_address
 
 from app.db.database import get_db
-from app.db.models import User
+# renamed to avoid clashing with SQLAlchemy's Session type
+from app.db.models import User, Session as SessionModel
 from app.core.security import hash_password, verify_password, generate_session_token
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -38,12 +40,6 @@ def check_not_breached(password: str) -> str:
 
 
 def verify_password_strength(v: str) -> str:
-    """
-    Long passphrases (16+ chars) are exempt from composition rules —
-    length alone gives them sufficient entropy (NIST SP 800-63B).
-    Shorter passwords must satisfy character-class complexity to
-    compensate for their shorter length.
-    """
     if len(v) >= 16:
         return v
 
@@ -107,8 +103,6 @@ async def login(request: Request, response: Response, payload: LoginRequest, db:
             User.username == payload.identifier)
     ).first()
 
-    # Always run verify_password, even on a missing user, against a dummy hash —
-    # keeps response timing identical whether the account exists or not
     dummy_hash = "$argon2id$v=19$m=65536,t=3,p=4$c29tZXNhbHQ$dGVzdGhhc2g"
     password_hash_to_check = user.password_hash if (
         user and user.password_hash) else dummy_hash
@@ -119,17 +113,31 @@ async def login(request: Request, response: Response, payload: LoginRequest, db:
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
     session_token = generate_session_token()
+    expires_at = datetime.now(timezone.utc) + timedelta(days=7)
+
+    db_session = SessionModel(
+        token=session_token, user_id=user.id, expires_at=expires_at)
+    db.add(db_session)
+    db.commit()
 
     response.set_cookie(
         key="session_token",
         value=session_token,
         httponly=True,
-        secure=True,       # cookie only sent over HTTPS
-        samesite="lax",    # CSRF mitigation
-        max_age=60 * 60 * 24 * 7,  # 7 days
+        secure=True,
+        samesite="lax",
+        max_age=60 * 60 * 24 * 7,
     )
 
-    # NOTE: session_token needs to be stored server-side (DB or Redis) mapped to user.id
-    # so a later request can look up *who* this cookie belongs to — that's next.
-
     return {"message": "Login successful"}
+
+
+@router.post("/logout")
+def logout(request: Request, response: Response, session_token: str | None = Cookie(default=None), db: Session = Depends(get_db)):
+    if session_token:
+        db.query(SessionModel).filter(
+            SessionModel.token == session_token).delete()
+        db.commit()
+
+    response.delete_cookie("session_token")
+    return {"message": "Logged out"}
