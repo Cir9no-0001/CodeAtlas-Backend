@@ -1,9 +1,11 @@
 import hashlib
 import httpx
 import re
+from fastapi.concurrency import run_in_threadpool
 from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import IntegrityError
 from pydantic import BaseModel, EmailStr, Field, AfterValidator
 from slowapi import Limiter
 from slowapi.util import get_remote_address
@@ -75,3 +77,59 @@ class SignupRequest(BaseModel):
 class LoginRequest(BaseModel):
     identifier: str
     password: str
+
+
+@router.post("/signup", status_code=201)
+@limiter.limit("5/minute")
+def signup(request: Request, payload: SignupRequest, db: Session = Depends(get_db)):
+    user = User(
+        email=payload.email,
+        password_hash=hash_password(payload.password),
+        account_setup_complete=True,
+    )
+    try:
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(
+            status_code=400, detail="Unable to create account with these details")
+
+    return {"message": "Account created", "user_id": user.id}
+
+
+@router.post("/login")
+@limiter.limit("5/minute")
+async def login(request: Request, response: Response, payload: LoginRequest, db: Session = Depends(get_db)):
+    user = db.query(User).filter(
+        (User.email == payload.identifier) | (
+            User.username == payload.identifier)
+    ).first()
+
+    # Always run verify_password, even on a missing user, against a dummy hash —
+    # keeps response timing identical whether the account exists or not
+    dummy_hash = "$argon2id$v=19$m=65536,t=3,p=4$c29tZXNhbHQ$dGVzdGhhc2g"
+    password_hash_to_check = user.password_hash if (
+        user and user.password_hash) else dummy_hash
+
+    valid = await run_in_threadpool(verify_password, payload.password, password_hash_to_check)
+
+    if not user or not user.password_hash or not valid:
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+
+    session_token = generate_session_token()
+
+    response.set_cookie(
+        key="session_token",
+        value=session_token,
+        httponly=True,
+        secure=True,       # cookie only sent over HTTPS
+        samesite="lax",    # CSRF mitigation
+        max_age=60 * 60 * 24 * 7,  # 7 days
+    )
+
+    # NOTE: session_token needs to be stored server-side (DB or Redis) mapped to user.id
+    # so a later request can look up *who* this cookie belongs to — that's next.
+
+    return {"message": "Login successful"}
