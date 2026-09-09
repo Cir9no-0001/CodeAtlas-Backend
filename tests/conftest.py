@@ -12,7 +12,7 @@ TEST_DATABASE_URL = "sqlite:///:memory:"
 engine = create_engine(
     TEST_DATABASE_URL,
     connect_args={"check_same_thread": False},
-    poolclass=StaticPool,  # ← forces all connections to share the same in-memory DB
+    poolclass=StaticPool,
 )
 TestingSessionLocal = sessionmaker(
     autocommit=False, autoflush=False, bind=engine)

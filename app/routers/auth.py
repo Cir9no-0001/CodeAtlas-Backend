@@ -12,8 +12,10 @@ from slowapi import Limiter
 from slowapi.util import get_remote_address
 
 from app.db.database import get_db
-# renamed to avoid clashing with SQLAlchemy's Session type
+
+# IMPORTANT: renamed to avoid clashing with SQLAlchemy's Session type
 from app.db.models import User, Session as SessionModel
+
 from app.core.security import hash_password, verify_password, generate_session_token
 
 router = APIRouter(prefix="/auth", tags=["auth"])
