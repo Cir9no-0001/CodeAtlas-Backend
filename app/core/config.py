@@ -1,3 +1,5 @@
+# core/config.py
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -12,6 +14,7 @@ class Settings(BaseSettings):
     google_client_secret: str
 
     oauth_redirect_base_url: str  # e.g. http://localhost:8000
+    extension_oauth_redirect_url: str
 
     model_config = SettingsConfigDict(
         env_file=".env", env_file_encoding="utf-8")

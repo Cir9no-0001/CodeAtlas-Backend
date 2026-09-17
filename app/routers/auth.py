@@ -1,3 +1,5 @@
+# routers/auth.py
+
 import hashlib
 import httpx
 import re
@@ -10,6 +12,9 @@ from sqlalchemy.exc import IntegrityError
 from pydantic import BaseModel, EmailStr, Field, AfterValidator
 from slowapi import Limiter
 from slowapi.util import get_remote_address
+from app.core.oauth import oauth
+from fastapi.responses import RedirectResponse
+from app.core.config import settings
 
 from app.db.database import get_db
 
@@ -143,3 +148,96 @@ def logout(request: Request, response: Response, session_token: str | None = Coo
 
     response.delete_cookie("session_token")
     return {"message": "Logged out"}
+
+
+@router.get("/github/login")
+async def github_login(request: Request):
+    redirect_uri = f"{settings.oauth_redirect_base_url}/auth/github/callback"
+    return await oauth.github.authorize_redirect(request, redirect_uri)
+
+
+@router.get("/github/callback")
+async def github_callback(request: Request, db: Session = Depends(get_db)):
+    token = await oauth.github.authorize_access_token(request)
+    profile = (await oauth.github.get("user", token=token)).json()
+
+    emails = (await oauth.github.get("user/emails", token=token)).json()
+    primary = next((e for e in emails if e.get("primary")),
+                   emails[0] if emails else None)
+    if primary is None:
+        raise HTTPException(
+            status_code=400, detail="GitHub account has no accessible email")
+
+    user = _find_or_create_oauth_user(
+        db, provider_field="github_id", provider_id=str(profile["id"]),
+        email=primary["email"], email_verified=primary.get("verified", False),
+    )
+    return _issue_session_and_redirect(db, user)
+
+
+@router.get("/google/login")
+async def google_login(request: Request):
+    redirect_uri = f"{settings.oauth_redirect_base_url}/auth/google/callback"
+    return await oauth.google.authorize_redirect(request, redirect_uri)
+
+
+@router.get("/google/callback")
+async def google_callback(request: Request, db: Session = Depends(get_db)):
+    token = await oauth.google.authorize_access_token(request)
+    profile = token.get("userinfo")
+
+    user = _find_or_create_oauth_user(
+        db, provider_field="google_id", provider_id=profile["sub"],
+        email=profile["email"], email_verified=profile.get(
+            "email_verified", False),
+    )
+    return _issue_session_and_redirect(db, user)
+
+
+def _find_or_create_oauth_user(
+    db: Session, provider_field: str, provider_id: str, email: str, email_verified: bool
+) -> User:
+    existing_by_provider = db.query(User).filter(
+        getattr(User, provider_field) == provider_id).first()
+    if existing_by_provider:
+        return existing_by_provider
+
+    existing_by_email = db.query(User).filter(User.email == email).first()
+    if existing_by_email:
+        if not email_verified:
+            raise HTTPException(
+                status_code=409,
+                detail="An account with this email already exists. Log in with your password first to link this provider.",
+            )
+        setattr(existing_by_email, provider_field, provider_id)
+        db.commit()
+        db.refresh(existing_by_email)
+        return existing_by_email
+
+    user = User(
+        email=email,
+        password_hash=None,
+        account_setup_complete=False,
+        **{provider_field: provider_id},
+    )
+    try:
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(
+            status_code=400, detail="Unable to create account with these details")
+    return user
+
+
+def _issue_extension_redirect(db: Session, user: User) -> RedirectResponse:
+    session_token = generate_session_token()
+    expires_at = datetime.now(timezone.utc) + timedelta(days=7)
+
+    db_session = SessionModel(
+        token=session_token, user_id=user.id, expires_at=expires_at)
+    db.add(db_session)
+    db.commit()
+
+    return RedirectResponse(url=f"{settings.extension_oauth_redirect_url}#session_token={session_token}")
