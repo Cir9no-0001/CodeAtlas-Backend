@@ -8,7 +8,7 @@ from slowapi.errors import RateLimitExceeded
 from app.routers import auth
 from app.routers.auth import limiter
 from app.core.config import settings
-from app.db import models  # noqa: F401  (registers the tables)
+from app.db import models  # DO NOT DELETE (registers the tables)
 from app.db.database import Base, engine
 
 
