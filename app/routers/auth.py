@@ -21,7 +21,7 @@ from app.db.database import get_db
 # IMPORTANT: renamed to avoid clashing with SQLAlchemy's Session type
 from app.db.models import User, Session as SessionModel
 
-from app.core.security import hash_password, verify_password, generate_session_token
+from app.core.security import hash_password, verify_password, generate_session_token, hash_session_token
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 limiter = Limiter(key_func=get_remote_address)
@@ -122,8 +122,8 @@ async def login(request: Request, response: Response, payload: LoginRequest, db:
     session_token = generate_session_token()
     expires_at = datetime.now(timezone.utc) + timedelta(days=7)
 
-    db_session = SessionModel(
-        token=session_token, user_id=user.id, expires_at=expires_at)
+    db_session = SessionModel(token_hash=hash_session_token(session_token), user_id=user.id, expires_at=expires_at)
+
     db.add(db_session)
     db.commit()
 
@@ -143,7 +143,7 @@ async def login(request: Request, response: Response, payload: LoginRequest, db:
 def logout(request: Request, response: Response, session_token: str | None = Cookie(default=None), db: Session = Depends(get_db)):
     if session_token:
         db.query(SessionModel).filter(
-            SessionModel.token == session_token).delete()
+            SessionModel.token_hash == hash_session_token(session_token)).delete()
         db.commit()
 
     response.delete_cookie("session_token")
@@ -172,7 +172,7 @@ async def github_callback(request: Request, db: Session = Depends(get_db)):
         db, provider_field="github_id", provider_id=str(profile["id"]),
         email=primary["email"], email_verified=primary.get("verified", False),
     )
-    return _issue_session_and_redirect(db, user)
+    return _issue_extension_redirect(db, user)
 
 
 @router.get("/google/login")
@@ -191,7 +191,7 @@ async def google_callback(request: Request, db: Session = Depends(get_db)):
         email=profile["email"], email_verified=profile.get(
             "email_verified", False),
     )
-    return _issue_session_and_redirect(db, user)
+    return _issue_extension_redirect(db, user)
 
 
 def _find_or_create_oauth_user(
@@ -235,8 +235,8 @@ def _issue_extension_redirect(db: Session, user: User) -> RedirectResponse:
     session_token = generate_session_token()
     expires_at = datetime.now(timezone.utc) + timedelta(days=7)
 
-    db_session = SessionModel(
-        token=session_token, user_id=user.id, expires_at=expires_at)
+    db_session = SessionModel(token_hash=hash_session_token(session_token), user_id=user.id, expires_at=expires_at)
+
     db.add(db_session)
     db.commit()
 

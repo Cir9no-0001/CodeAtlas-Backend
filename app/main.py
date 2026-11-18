@@ -1,4 +1,4 @@
-# main.py
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from starlette.middleware.sessions import SessionMiddleware
@@ -8,8 +8,18 @@ from slowapi.errors import RateLimitExceeded
 from app.routers import auth
 from app.routers.auth import limiter
 from app.core.config import settings
+from app.db import models  # noqa: F401  (registers the tables)
+from app.db.database import Base, engine
 
-app = FastAPI(title="CodeAtlas Backend")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    if settings.environment == "development":
+        Base.metadata.create_all(bind=engine)
+    yield
+
+
+app = FastAPI(title="CodeAtlas Backend", lifespan=lifespan)
 
 app.add_middleware(SessionMiddleware, secret_key=settings.session_secret_key)
 
